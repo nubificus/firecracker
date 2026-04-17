@@ -48,6 +48,8 @@ pub enum NetError {
     TapSetOffload(TapError),
     /// Setting vnet header size failed: {0}
     TapSetVnetHdrSize(TapError),
+    /// Getting tap MTU failed: {0}
+    TapGetMtu(TapError),
     /// EventFd error: {0}
     EventFd(io::Error),
     /// IO error: {0}

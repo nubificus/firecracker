@@ -10,6 +10,11 @@ and this project adheres to
 
 ### Added
 
+- [#5828](https://github.com/firecracker-microvm/firecracker/pull/5828):
+  Advertise TAP interface MTU to the guest via `VIRTIO_NET_F_MTU`. The
+  virtio-net device now reads the host TAP MTU using `SIOCGIFMTU` and stores it
+  in the config space, allowing the guest driver to configure the network
+  interface with the correct MTU automatically.
 - [#4346](https://github.com/firecracker-microvm/firecracker/pull/4346): Added
   support to emit aggregate (minimum/maximum/sum) latency for
   `VcpuExit::MmioRead`, `VcpuExit::MmioWrite`, `VcpuExit::IoIn` and

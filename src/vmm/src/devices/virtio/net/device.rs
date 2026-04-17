@@ -25,6 +25,7 @@ use crate::devices::virtio::gen::virtio_blk::VIRTIO_F_VERSION_1;
 use crate::devices::virtio::gen::virtio_net::{
     virtio_net_hdr_v1, VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM, VIRTIO_NET_F_GUEST_TSO4,
     VIRTIO_NET_F_GUEST_UFO, VIRTIO_NET_F_HOST_TSO4, VIRTIO_NET_F_HOST_UFO, VIRTIO_NET_F_MAC,
+    VIRTIO_NET_F_MTU,
 };
 use crate::devices::virtio::gen::virtio_ring::VIRTIO_RING_F_EVENT_IDX;
 use crate::devices::virtio::iovec::IoVecBuffer;
@@ -96,11 +97,20 @@ fn init_vnet_hdr(buf: &mut [u8]) {
 }
 
 #[derive(Debug, Default, Clone, Copy)]
+#[repr(C)]
 pub struct ConfigSpace {
     pub guest_mac: MacAddr,
+    // Padding fields to match the virtio_net_config layout:
+    // offset 6: status (u16, not advertised)
+    _status: u16,
+    // offset 8: max_virtqueue_pairs (u16, not advertised)
+    _max_virtqueue_pairs: u16,
+    // offset 10: mtu (u16, advertised via VIRTIO_NET_F_MTU)
+    pub mtu: u16,
 }
 
-// SAFETY: `ConfigSpace` contains only PODs.
+// SAFETY: `ConfigSpace` contains only PODs in `repr(C)` or `repr(transparent)`, without padding.
+// MacAddr is [u8; 6] (align 1, size 6); u16 fields follow at naturally aligned offsets.
 unsafe impl ByteValued for ConfigSpace {}
 
 /// VirtIO network device.
@@ -152,6 +162,7 @@ impl Net {
         guest_mac: Option<MacAddr>,
         rx_rate_limiter: RateLimiter,
         tx_rate_limiter: RateLimiter,
+        mtu: u16,
     ) -> Result<Self, NetError> {
         let mut avail_features = 1 << VIRTIO_NET_F_GUEST_CSUM
             | 1 << VIRTIO_NET_F_CSUM
@@ -160,9 +171,17 @@ impl Net {
             | 1 << VIRTIO_NET_F_HOST_TSO4
             | 1 << VIRTIO_NET_F_HOST_UFO
             | 1 << VIRTIO_F_VERSION_1
-            | 1 << VIRTIO_RING_F_EVENT_IDX;
+            | 1 << VIRTIO_RING_F_EVENT_IDX
+            // VIRTIO_NET_F_MTU advertises the host TAP MTU to the guest so the
+            // driver can set the interface MTU accordingly. This is purely an
+            // advertisement: the device places the TAP MTU in config space and
+            // the guest driver reads it; no back-and-forth negotiation occurs.
+            | 1 << VIRTIO_NET_F_MTU;
 
-        let mut config_space = ConfigSpace::default();
+        let mut config_space = ConfigSpace {
+            mtu,
+            ..Default::default()
+        };
         if let Some(mac) = guest_mac {
             config_space.guest_mac = mac;
             // Enabling feature for MAC address configuration
@@ -218,7 +237,9 @@ impl Net {
         tap.set_vnet_hdr_size(vnet_hdr_size)
             .map_err(NetError::TapSetVnetHdrSize)?;
 
-        Self::new_with_tap(id, tap, guest_mac, rx_rate_limiter, tx_rate_limiter)
+        let mtu = tap.mtu().map_err(NetError::TapGetMtu)?;
+
+        Self::new_with_tap(id, tap, guest_mac, rx_rate_limiter, tx_rate_limiter, mtu)
     }
 
     /// Provides the ID of this net device.
@@ -1012,8 +1033,9 @@ pub mod tests {
         assert_eq!(&config_mac, mac.get_bytes());
 
         // Invalid read.
+        // Invalid read (past end of config space).
         config_mac = [0u8; MAC_ADDR_LEN as usize];
-        net.read_config(u64::from(MAC_ADDR_LEN), &mut config_mac);
+        net.read_config(std::mem::size_of::<ConfigSpace>() as u64, &mut config_mac);
         assert_eq!(config_mac, [0u8, 0u8, 0u8, 0u8, 0u8, 0u8]);
     }
 
@@ -1042,7 +1064,8 @@ pub mod tests {
         assert_eq!(new_config, new_config_read);
 
         // Invalid write.
-        net.write_config(5, &new_config);
+        // Invalid write (past end of config space).
+        net.write_config(std::mem::size_of::<ConfigSpace>() as u64, &new_config);
         // Verify old config was untouched.
         new_config_read = [0u8; MAC_ADDR_LEN as usize];
         net.read_config(0, &mut new_config_read);

@@ -37,6 +37,12 @@ pub enum TapError {
     SetOffloadFlags(IoError),
     /// Error while setting size of the vnet header: {0}
     SetSizeOfVnetHdr(IoError),
+    /// Error while creating a socket: {0}
+    CreateSocket(IoError),
+    /// Error while getting MTU: {0}
+    GetMtu(IoError),
+    /// MTU value out of range
+    MtuOutOfRange,
 }
 
 const TUNTAP: ::std::os::raw::c_uint = 84;
@@ -183,6 +189,26 @@ impl Tap {
         }
 
         Ok(())
+    }
+
+    /// Get the MTU of the tap interface.
+    pub fn mtu(&self) -> Result<u16, TapError> {
+        // SAFETY: socket() is safe to call with valid parameters.
+        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+        if sock < 0 {
+            return Err(TapError::CreateSocket(IoError::last_os_error()));
+        }
+        // SAFETY: sock is a valid fd; we own it and close it via File.
+        let sock_file = unsafe { File::from_raw_fd(sock) };
+
+        let ifreq = IfReqBuilder::new()
+            .if_name(&self.if_name)
+            .execute(&sock_file, gen::sockios::SIOCGIFMTU as u64)
+            .map_err(TapError::GetMtu)?;
+
+        // SAFETY: After a successful SIOCGIFMTU ioctl the ifru_mtu field is valid.
+        let mtu = unsafe { ifreq.ifr_ifru.ifru_mtu };
+        u16::try_from(mtu).map_err(|_| TapError::MtuOutOfRange)
     }
 
     /// Write an `IoVecBuffer` to tap
